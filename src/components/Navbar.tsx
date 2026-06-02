@@ -28,6 +28,7 @@ export function Navbar() {
         { to: '/history', label: 'History' },
         { to: '/ai-chat', label: 'AI Assistant' },
         { to: '/reverse-lookup', label: 'Phone Lookup' },
+        { to: '/ip-scanner', label: '🌐 IP Scanner' },
         { to: '/block-lists', label: 'Block Lists' },
         { to: '/auto-monitor', label: 'Auto Monitor' },
         { to: '/dark-web', label: 'Dark Web' },

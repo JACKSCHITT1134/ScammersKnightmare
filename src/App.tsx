@@ -17,6 +17,7 @@ import { SocialMediaAnalyzer } from '@/pages/SocialMediaAnalyzer';
 import { SubscriptionManagement } from '@/pages/SubscriptionManagement';
 import { AgentControl } from '@/pages/AgentControl';
 import { PredatorHunter } from '@/pages/PredatorHunter';
+import { IPScanner } from '@/pages/IPScanner';
 
 function App() {
   return (
@@ -128,6 +129,14 @@ function App() {
             element={
               <ProtectedRoute>
                 <PredatorHunter />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/ip-scanner"
+            element={
+              <ProtectedRoute>
+                <IPScanner />
               </ProtectedRoute>
             }
           />
