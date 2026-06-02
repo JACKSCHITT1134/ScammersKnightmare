@@ -1,6 +1,6 @@
 /**
- * AI Fraud Detection Edge Function
- * Primary threat detection using JACKSCHITT AI Engine
+ * AI Fraud Detection Edge Function - Powered by OnSpace AI (Knight AI)
+ * Primary threat detection using JACKSCHITT AI Engine + OnSpace AI
  * IPQS used as backup/validation only
  */
 
@@ -16,53 +16,101 @@ import {
   type FraudDecision
 } from '../_shared/ai-fraud-engine.ts';
 
-// IPQS fallback (when AI recommends validation)
-interface IPQSResponse {
-  success: boolean;
-  fraud_score: number;
-  threat_level: string;
-}
-
-async function validateWithIPQS(
-  type: string, 
-  value: string
-): Promise<IPQSResponse | null> {
+async function validateWithIPQS(type: string, value: string): Promise<any | null> {
   const apiKey = Deno.env.get('IPQS_API_KEY');
-  if (!apiKey) {
-    console.log('⚠️ IPQS API key not configured, skipping validation');
-    return null;
-  }
+  if (!apiKey) return null;
 
   try {
-    const endpoint = type === 'email' ? 'emailvalidation' : 
-                    type === 'ip' ? 'ip' :
-                    type === 'phone' ? 'phone' :
-                    type === 'url' ? 'url' : null;
-
+    const endpointMap: Record<string, string> = {
+      email: 'emailvalidation',
+      ip: 'ip',
+      phone: 'phone',
+      url: 'url',
+    };
+    const endpoint = endpointMap[type];
     if (!endpoint) return null;
 
     const url = `https://ipqualityscore.com/api/json/${endpoint}/${apiKey}/${encodeURIComponent(value)}`;
     const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
-    
-    if (!response.ok) {
-      console.error(`IPQS API error: ${response.status}`);
-      return null;
-    }
+    if (!response.ok) return null;
 
     const data = await response.json();
     return {
       success: data.success || false,
       fraud_score: data.fraud_score || 0,
-      threat_level: data.fraud_score >= 75 ? 'high' : data.fraud_score >= 50 ? 'medium' : 'low'
+      threat_level: data.fraud_score >= 75 ? 'high' : data.fraud_score >= 50 ? 'medium' : 'low',
+      raw: data,
     };
   } catch (error) {
-    console.error('IPQS validation error:', error);
+    console.error('IPQS error:', error);
     return null;
   }
 }
 
+async function enhanceWithAI(
+  type: string,
+  value: string,
+  fraudProbability: number,
+  anomalyScore: number,
+  ipqsData: any
+): Promise<string> {
+  const aiApiKey = Deno.env.get('ONSPACE_AI_API_KEY');
+  const aiBaseUrl = Deno.env.get('ONSPACE_AI_BASE_URL');
+
+  if (!aiApiKey || !aiBaseUrl) {
+    return `Knight AI detected ${type} with ${(fraudProbability * 100).toFixed(0)}% fraud probability.`;
+  }
+
+  const ipqsContext = ipqsData 
+    ? `IPQS validation score: ${ipqsData.fraud_score}/100.` 
+    : 'IPQS backup not used.';
+
+  const prompt = `Analyze this ${type} scan result for Scammer's Knightmare threat detection:
+
+Target: ${value}
+Type: ${type}
+AI Fraud Probability: ${(fraudProbability * 100).toFixed(1)}%
+Anomaly Score: ${(anomalyScore * 100).toFixed(1)}%
+${ipqsContext}
+
+Provide a 2-3 sentence threat analysis explaining:
+1. What specific risks this ${type} poses
+2. Why the fraud probability is at this level
+3. One specific action the user should take
+
+Be direct and specific. No generic advice.`;
+
+  try {
+    const response = await fetch(`${aiBaseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${aiApiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'google/gemini-3-flash-preview',
+        messages: [
+          {
+            role: 'system',
+            content: 'You are Knight AI, an expert fraud detection system. Provide concise, actionable threat analysis.'
+          },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.2,
+        max_tokens: 300,
+      }),
+    });
+
+    if (!response.ok) return `Threat analysis for ${type}: fraud probability ${(fraudProbability * 100).toFixed(0)}%.`;
+    
+    const result = await response.json();
+    return result.choices?.[0]?.message?.content || `Knight AI: ${type} analyzed with ${(fraudProbability * 100).toFixed(0)}% fraud risk.`;
+  } catch {
+    return `Knight AI: ${type} analyzed with ${(fraudProbability * 100).toFixed(0)}% fraud risk.`;
+  }
+}
+
 Deno.serve(async (req) => {
-  // CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
@@ -77,7 +125,6 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Initialize Supabase admin client
     const supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
@@ -98,12 +145,12 @@ Deno.serve(async (req) => {
       humility: 0.70,
       total_decisions: 0,
       correct_catches: 0,
-      false_positives: 0
+      false_positives: 0,
     };
 
-    console.log('🛡️ Knight AI Personality:', personality);
+    console.log('🛡️ Knight AI Personality:', JSON.stringify(personality));
 
-    // Step 2: Load user baseline (if user_id provided)
+    // Step 2: Load user baseline
     let baseline: UserBaseline | null = null;
     if (user_id) {
       const { data: baselineData } = await supabaseAdmin
@@ -112,11 +159,10 @@ Deno.serve(async (req) => {
         .eq('user_id', user_id)
         .limit(1)
         .single();
-
       baseline = baselineData;
     }
 
-    // Step 3: Calculate fraud probability (rule-based scoring)
+    // Step 3: Calculate fraud probability
     let fraudProbability = 0.0;
     switch (type) {
       case 'email':
@@ -132,21 +178,19 @@ Deno.serve(async (req) => {
         fraudProbability = FraudScorer.scorePhone(value);
         break;
       default:
-        fraudProbability = 0.5; // Unknown type
+        fraudProbability = 0.35;
     }
 
     console.log(`📊 Fraud Probability: ${(fraudProbability * 100).toFixed(1)}%`);
 
-    // Step 4: Calculate anomaly score (behavioral deviation)
+    // Step 4: Calculate anomaly score
     const anomalyResult = AnomalyDetector.calculateAnomaly(
       { type, value, user_id, metadata },
       baseline,
       metadata || {}
     );
 
-    console.log(`🔍 Anomaly Score: ${(anomalyResult.score * 100).toFixed(1)}%`, anomalyResult.deviations);
-
-    // Step 5: AI makes decision using personality engine
+    // Step 5: AI makes personality-driven decision
     const decision: FraudDecision = PersonalityEngine.decide(
       fraudProbability,
       anomalyResult.score,
@@ -154,23 +198,27 @@ Deno.serve(async (req) => {
       { type, value, user_id, metadata }
     );
 
-    console.log(`🎯 AI Decision: ${decision.action.toUpperCase()} (confidence: ${(decision.confidence * 100).toFixed(1)}%)`);
+    console.log(`🎯 AI Decision: ${decision.action.toUpperCase()}`);
 
-    // Step 6: IPQS validation (if recommended or high risk)
-    let ipqsResult: IPQSResponse | null = null;
-    if (decision.recommend_ipqs_validation) {
-      console.log('🔄 AI recommends IPQS validation...');
+    // Step 6: IPQS validation for medium/high risk
+    let ipqsResult: any = null;
+    if (decision.recommend_ipqs_validation || decision.risk_score > 0.5) {
+      console.log('🔄 Running IPQS backup validation...');
       ipqsResult = await validateWithIPQS(type, value);
       
       if (ipqsResult && ipqsResult.fraud_score > 75) {
-        // IPQS confirms high risk - upgrade decision to block
-        console.log('⚠️ IPQS confirms high risk, upgrading to BLOCK');
         decision.action = 'block';
         decision.risk_score = Math.max(decision.risk_score, ipqsResult.fraud_score / 100);
+        console.log('⚠️ IPQS confirms high risk - upgraded to BLOCK');
       }
     }
 
-    // Step 7: Log decision to audit trail
+    // Step 7: Enhance with OnSpace AI explanation
+    const aiExplanation = await enhanceWithAI(
+      type, value, fraudProbability, anomalyResult.score, ipqsResult
+    );
+
+    // Step 8: Log decision
     if (user_id) {
       await supabaseAdmin
         .from('ai_decision_log')
@@ -182,42 +230,49 @@ Deno.serve(async (req) => {
           risk_score: decision.risk_score,
           fraud_probability: decision.fraud_probability,
           anomaly_score: decision.anomaly_score,
-          reasoning: decision.reasoning,
+          reasoning: {
+            ...decision.reasoning,
+            ai_explanation: aiExplanation,
+          },
           personality_snapshot: personality,
-          ipqs_used: ipqsResult !== null
+          ipqs_used: ipqsResult !== null,
         });
 
-      // Update user baseline (learn from this transaction)
+      // Update user baseline
       const currentHour = new Date().getHours();
       if (baseline) {
-        const typicalHours = baseline.typical_hours || [];
-        if (!typicalHours.includes(currentHour)) {
-          typicalHours.push(currentHour);
-        }
-
+        const typicalHours: number[] = baseline.typical_hours || [];
+        if (!typicalHours.includes(currentHour)) typicalHours.push(currentHour);
         await supabaseAdmin
           .from('user_baselines')
           .update({
             total_transactions: (baseline.total_transactions || 0) + 1,
             typical_hours: typicalHours,
             last_transaction_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
+            updated_at: new Date().toISOString(),
           })
           .eq('user_id', user_id);
       } else {
-        // Create new baseline
         await supabaseAdmin
           .from('user_baselines')
           .insert({
             user_id,
             total_transactions: 1,
             typical_hours: [currentHour],
-            last_transaction_at: new Date().toISOString()
+            last_transaction_at: new Date().toISOString(),
           });
       }
+
+      // Evolve personality based on scan count
+      await supabaseAdmin
+        .from('ai_personality_state')
+        .update({
+          total_decisions: (personality.total_decisions || 0) + 1,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', personalityData?.id);
     }
 
-    // Step 8: Return decision
     return new Response(
       JSON.stringify({
         success: true,
@@ -226,38 +281,30 @@ Deno.serve(async (req) => {
           threat_level: decision.risk_score > 0.7 ? 'high' : decision.risk_score > 0.4 ? 'medium' : 'low',
           risk_score: Math.round(decision.risk_score * 100),
           confidence: Math.round(decision.confidence * 100),
-          explanation: decision.reasoning.final_explanation,
+          explanation: aiExplanation,
           details: {
             fraud_probability: decision.fraud_probability,
             anomaly_score: decision.anomaly_score,
             factors: decision.reasoning.primary_factors,
             behavioral_deviation: decision.reasoning.behavioral_deviation,
-            personality_influence: decision.reasoning.personality_influence
+            personality_influence: decision.reasoning.personality_influence,
           },
-          ipqs_validation: ipqsResult ? {
-            used: true,
-            fraud_score: ipqsResult.fraud_score,
-            threat_level: ipqsResult.threat_level
-          } : null
-        }
+          ipqs_validation: ipqsResult
+            ? {
+                used: true,
+                fraud_score: ipqsResult.fraud_score,
+                threat_level: ipqsResult.threat_level,
+              }
+            : null,
+        },
       }),
-      { 
-        status: 200, 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-      }
+      { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
-
   } catch (error: any) {
-    console.error('❌ AI Fraud Detection Error:', error);
+    console.error('❌ Knight AI Fraud Detection Error:', error);
     return new Response(
-      JSON.stringify({ 
-        error: 'AI detection failed',
-        message: error.message || 'Unknown error'
-      }),
-      { 
-        status: 500, 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-      }
+      JSON.stringify({ error: 'AI detection failed', message: error.message }),
+      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   }
 });

@@ -124,7 +124,7 @@ export function Dashboard() {
         </Card>
 
         {/* Auto-Scan Status (Premium) */}
-        {(user.tier === 'premium' || user.tier === 'family') && (
+            {(user.tier === 'premium' || user.tier === 'family') && (
           <div className="bg-gradient-to-r from-primary/20 to-accent/20 border border-primary/50 rounded-lg p-6 mb-8">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-3">
@@ -136,7 +136,7 @@ export function Dashboard() {
                   </p>
                 </div>
               </div>
-              <Button variant="outline" size="sm">
+              <Button variant="outline" size="sm" onClick={() => navigate('/auto-monitor')}>
                 <Settings className="w-4 h-4 mr-2" />
                 Configure
               </Button>

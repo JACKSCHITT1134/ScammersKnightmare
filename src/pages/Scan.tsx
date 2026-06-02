@@ -43,10 +43,24 @@ export function Scan() {
 
     setIsScanning(true);
     setResult(null);
+    setAiEnhancement(null);
 
     try {
       const scanResult = await scanner.scan(type, input);
       setResult(scanResult);
+      
+      if (hasAiAccess || true) {
+        setEnhancing(true);
+        try {
+          const enhancement = await operitAI.enhanceScan(scanResult.details, type);
+          setAiEnhancement(enhancement);
+        } catch (aiErr: any) {
+          console.error('Auto AI enhancement failed:', aiErr);
+          // Don't show error for AI enhancement failure - scan still succeeded
+        } finally {
+          setEnhancing(false);
+        }
+      }
       
       // Refresh user data
       const updatedUser = await auth.getCurrentUser();
@@ -135,12 +149,12 @@ export function Scan() {
                       {enhancing ? (
                         <>
                           <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                          Analyzing...
+                          Knight AI Analyzing...
                         </>
                       ) : (
                         <>
                           <Sparkles className="w-4 h-4 mr-2" />
-                          Get AI Insights
+                          Get Knight AI Insights
                         </>
                       )}
                     </Button>
@@ -155,7 +169,7 @@ export function Scan() {
                   </div>
                 ) : !enhancing ? (
                   <p className="text-sm text-muted-foreground">
-                    Click "Get AI Insights" to receive advanced threat analysis and recommendations powered by Operit AI.
+                    Click "Get Knight AI Insights" to receive advanced threat analysis powered by Knight AI (Gemini).
                   </p>
                 ) : null}
               </Card>

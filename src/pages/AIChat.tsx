@@ -165,18 +165,18 @@ export function AIChat() {
                 AI Knight Assistant
               </h1>
               <p className="text-muted-foreground mt-1">
-                Powered by Operit AI + Grok
+                Powered by Knight AI (Gemini 3 Flash)
               </p>
             </div>
           </div>
           {usage && (
             <div className="text-sm text-muted-foreground">
-              {usage.quota_total ? (
+              {usage.quota_total && usage.quota_total < 999999 ? (
                 <span>
-                  {usage.quota_remaining} / {usage.quota_total} queries remaining
+                  <strong>{typeof usage.quota_remaining === 'number' ? usage.quota_remaining.toLocaleString() : '∞'}</strong> / {usage.quota_total.toLocaleString()} queries remaining
                 </span>
               ) : (
-                <span>Unlimited queries</span>
+                <span className="text-green-500 font-medium">Unlimited queries</span>
               )}
             </div>
           )}

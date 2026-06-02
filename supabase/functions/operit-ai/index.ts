@@ -1,8 +1,10 @@
+/**
+ * OnSpace AI (Knight AI) - Chat, Analysis, and Threat Enhancement
+ * Powered by OnSpace AI with google/gemini-3-flash-preview by default
+ */
+
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders } from '../_shared/cors.ts';
-
-const OPERIT_API_KEY = Deno.env.get('OPERIT_API_KEY');
-const OPERIT_API_URL = 'https://api.operit.ai/v1'; // Default endpoint, adjust as needed
 
 Deno.serve(async (req) => {
   // Handle CORS preflight
@@ -22,8 +24,8 @@ Deno.serve(async (req) => {
     }
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
-    const supabaseKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
-    const supabase = createClient(supabaseUrl, supabaseKey);
+    const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
+    const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
     // Get user from token
     const { data: { user }, error: userError } = await supabase.auth.getUser(token);
@@ -35,34 +37,45 @@ Deno.serve(async (req) => {
     }
 
     // Check user's AI permissions
-    const { data: profile, error: profileError } = await supabase
+    const supabaseAdmin = createClient(
+      supabaseUrl,
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    );
+
+    const { data: profile } = await supabaseAdmin
       .from('user_profiles')
-      .select('ai_features_enabled, ai_chat_enabled, ai_analysis_enabled, ai_monthly_quota, ai_quota_used')
+      .select('ai_features_enabled, ai_chat_enabled, ai_analysis_enabled, ai_monthly_quota, ai_quota_used, tier')
       .eq('id', user.id)
       .single();
 
-    if (profileError || !profile) {
-      return new Response(
-        JSON.stringify({ error: 'User profile not found' }),
-        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    if (!profile.ai_features_enabled) {
+    if (!profile?.ai_features_enabled) {
       return new Response(
         JSON.stringify({ error: 'AI features not enabled for this user. Contact admin for access.' }),
         { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    const { action, data } = await req.json();
-
-    // Check quota before processing
-    const { data: quotaCheck } = await supabase.rpc('check_ai_quota', { user_uuid: user.id });
-    if (!quotaCheck) {
+    // Check quota
+    const quotaUsed = profile.ai_quota_used || 0;
+    const quotaTotal = profile.ai_monthly_quota;
+    if (quotaTotal !== null && quotaTotal !== undefined && quotaUsed >= quotaTotal) {
       return new Response(
         JSON.stringify({ error: 'Monthly AI quota exceeded. Please upgrade your plan or wait for next month.' }),
         { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const { action, data } = await req.json();
+
+    // OnSpace AI credentials
+    const aiApiKey = Deno.env.get('ONSPACE_AI_API_KEY');
+    const aiBaseUrl = Deno.env.get('ONSPACE_AI_BASE_URL');
+
+    if (!aiApiKey || !aiBaseUrl) {
+      console.error('OnSpace AI not configured');
+      return new Response(
+        JSON.stringify({ error: 'AI service not configured' }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
@@ -75,18 +88,29 @@ Deno.serve(async (req) => {
           );
         }
 
-        const { messages, conversationId, model = 'grok-beta' } = data;
+        const { messages, conversationId, model = 'google/gemini-3-flash-preview' } = data;
 
-        // Call Operit AI API
-        const response = await fetch(`${OPERIT_API_URL}/chat/completions`, {
+        // Prepend system message for Knight AI persona
+        const systemMessage = {
+          role: 'system',
+          content: `You are Knight AI, an expert cybersecurity assistant and scam detection specialist for Scammer's Knightmare. 
+You help users identify scams, phishing attempts, fraud, and online predators.
+Your personality: protective, bold, helpful, and vigilant. You speak clearly and directly.
+Specialties: fraud detection, phishing analysis, social engineering tactics, online predator patterns, dark web monitoring, financial scams.
+Always provide actionable advice and specific warning signs to watch for.`
+        };
+
+        const allMessages = [systemMessage, ...messages];
+
+        const response = await fetch(`${aiBaseUrl}/chat/completions`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${OPERIT_API_KEY}`,
             'Content-Type': 'application/json',
+            'Authorization': `Bearer ${aiApiKey}`,
           },
           body: JSON.stringify({
             model,
-            messages,
+            messages: allMessages,
             temperature: 0.7,
             max_tokens: 2000,
           }),
@@ -94,19 +118,20 @@ Deno.serve(async (req) => {
 
         if (!response.ok) {
           const errorText = await response.text();
-          console.error('Operit AI Error:', errorText);
+          console.error('OnSpace AI Error:', errorText);
           return new Response(
-            JSON.stringify({ error: `Operit AI: ${errorText}` }),
+            JSON.stringify({ error: `AI: ${errorText}` }),
             { status: response.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
           );
         }
 
         const result = await response.json();
+        console.log('Knight AI chat response received');
 
         // Save conversation and messages
         let convId = conversationId;
         if (!convId) {
-          const { data: newConv } = await supabase
+          const { data: newConv } = await supabaseAdmin
             .from('ai_conversations')
             .insert({
               user_id: user.id,
@@ -118,17 +143,23 @@ Deno.serve(async (req) => {
           convId = newConv?.id;
         }
 
-        // Save messages
-        const messagesToSave = [
-          { conversation_id: convId, role: 'user', content: messages[messages.length - 1].content },
-          { conversation_id: convId, role: 'assistant', content: result.choices[0].message.content },
-        ];
-
-        await supabase.from('ai_messages').insert(messagesToSave);
+        if (convId) {
+          const messagesToSave = [
+            { conversation_id: convId, role: 'user', content: messages[messages.length - 1].content },
+            { conversation_id: convId, role: 'assistant', content: result.choices[0].message.content },
+          ];
+          await supabaseAdmin.from('ai_messages').insert(messagesToSave);
+          
+          // Update conversation timestamp
+          await supabaseAdmin
+            .from('ai_conversations')
+            .update({ updated_at: new Date().toISOString() })
+            .eq('id', convId);
+        }
 
         // Log usage
         const tokens = result.usage?.total_tokens || 1000;
-        await supabase.from('ai_usage_log').insert({
+        await supabaseAdmin.from('ai_usage_log').insert({
           user_id: user.id,
           conversation_id: convId,
           model,
@@ -136,10 +167,14 @@ Deno.serve(async (req) => {
           completion_tokens: result.usage?.completion_tokens || 0,
           total_tokens: tokens,
           feature_type: 'chat',
+          cost: tokens * 0.000001,
         });
 
-        // Increment quota
-        await supabase.rpc('increment_ai_usage', { user_uuid: user.id, tokens: 1 });
+        // Increment quota usage
+        await supabaseAdmin
+          .from('user_profiles')
+          .update({ ai_quota_used: (quotaUsed + 1) })
+          .eq('id', user.id);
 
         return new Response(
           JSON.stringify({ ...result, conversationId: convId }),
@@ -157,32 +192,38 @@ Deno.serve(async (req) => {
 
         const { text, analysisType = 'general' } = data;
 
-        const systemPrompt = {
-          threat: 'You are a threat analysis AI. Analyze the provided content for potential scams, phishing, fraud, or malicious intent. Provide a detailed threat assessment.',
-          sentiment: 'You are a sentiment analysis AI. Analyze the emotional tone and intent of the provided content.',
-          general: 'You are a helpful AI assistant. Analyze and provide insights about the provided content.',
-        }[analysisType] || 'Analyze the following content:';
+        const systemPrompts: Record<string, string> = {
+          threat: `You are an expert threat analyst for Scammer's Knightmare. 
+Analyze the provided content for potential scams, phishing, fraud, predator behavior, or malicious intent.
+Provide: 1) Threat Level (SAFE/LOW/MEDIUM/HIGH/CRITICAL), 2) Key Red Flags found, 3) Specific type of threat, 4) Recommended action.
+Be direct and specific. Use concrete examples from the text.`,
+          sentiment: 'You are a communication analyst. Analyze the emotional tone, intent, manipulation tactics, and urgency in the provided content. Identify grooming patterns or pressure tactics.',
+          general: 'You are Knight AI, a cybersecurity assistant. Analyze and provide insights about the provided content from a security perspective.',
+        };
 
-        const response = await fetch(`${OPERIT_API_URL}/chat/completions`, {
+        const systemPrompt = systemPrompts[analysisType] || systemPrompts.general;
+
+        const response = await fetch(`${aiBaseUrl}/chat/completions`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${OPERIT_API_KEY}`,
             'Content-Type': 'application/json',
+            'Authorization': `Bearer ${aiApiKey}`,
           },
           body: JSON.stringify({
-            model: 'grok-beta',
+            model: 'google/gemini-3-flash-preview',
             messages: [
               { role: 'system', content: systemPrompt },
               { role: 'user', content: text },
             ],
             temperature: 0.3,
+            max_tokens: 1500,
           }),
         });
 
         if (!response.ok) {
           const errorText = await response.text();
           return new Response(
-            JSON.stringify({ error: `Operit AI: ${errorText}` }),
+            JSON.stringify({ error: `AI: ${errorText}` }),
             { status: response.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
           );
         }
@@ -190,14 +231,18 @@ Deno.serve(async (req) => {
         const result = await response.json();
 
         // Log usage
-        await supabase.from('ai_usage_log').insert({
+        await supabaseAdmin.from('ai_usage_log').insert({
           user_id: user.id,
-          model: 'grok-beta',
+          model: 'google/gemini-3-flash-preview',
           total_tokens: result.usage?.total_tokens || 500,
           feature_type: 'analysis',
+          cost: (result.usage?.total_tokens || 500) * 0.000001,
         });
 
-        await supabase.rpc('increment_ai_usage', { user_uuid: user.id, tokens: 1 });
+        await supabaseAdmin
+          .from('user_profiles')
+          .update({ ai_quota_used: (quotaUsed + 1) })
+          .eq('id', user.id);
 
         return new Response(
           JSON.stringify(result),
@@ -206,54 +251,126 @@ Deno.serve(async (req) => {
       }
 
       case 'enhance-scan': {
-        // AI-enhanced threat detection
         const { scanResult, scanType } = data;
 
-        const response = await fetch(`${OPERIT_API_URL}/chat/completions`, {
+        const response = await fetch(`${aiBaseUrl}/chat/completions`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${OPERIT_API_KEY}`,
             'Content-Type': 'application/json',
+            'Authorization': `Bearer ${aiApiKey}`,
           },
           body: JSON.stringify({
-            model: 'grok-beta',
+            model: 'google/gemini-3-flash-preview',
             messages: [
               {
                 role: 'system',
-                content: 'You are an expert threat analyst. Review the scan results and provide additional insights, context, and recommendations.',
+                content: `You are Knight AI, an expert cybersecurity threat analyst for Scammer's Knightmare.
+Review scan results and provide:
+1. Enhanced threat context and explanation
+2. Specific attack vectors this threat uses
+3. Real-world examples of this type of scam
+4. Step-by-step protection advice
+5. What to do if already victimized
+
+Format your response in clear sections with emojis for readability.`,
               },
               {
                 role: 'user',
-                content: `Scan Type: ${scanType}\n\nResults:\n${JSON.stringify(scanResult, null, 2)}\n\nProvide enhanced analysis and actionable recommendations.`,
+                content: `Scan Type: ${scanType}\n\nScan Results:\n${JSON.stringify(scanResult, null, 2)}\n\nProvide comprehensive analysis and actionable recommendations.`,
               },
             ],
             temperature: 0.4,
+            max_tokens: 2000,
           }),
         });
 
         if (!response.ok) {
           const errorText = await response.text();
           return new Response(
-            JSON.stringify({ error: `Operit AI: ${errorText}` }),
+            JSON.stringify({ error: `AI: ${errorText}` }),
             { status: response.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
           );
         }
 
         const result = await response.json();
 
-        await supabase.from('ai_usage_log').insert({
+        await supabaseAdmin.from('ai_usage_log').insert({
           user_id: user.id,
-          model: 'grok-beta',
+          model: 'google/gemini-3-flash-preview',
           total_tokens: result.usage?.total_tokens || 800,
           feature_type: 'threat_detection',
+          cost: (result.usage?.total_tokens || 800) * 0.000001,
         });
 
-        await supabase.rpc('increment_ai_usage', { user_uuid: user.id, tokens: 1 });
+        await supabaseAdmin
+          .from('user_profiles')
+          .update({ ai_quota_used: (quotaUsed + 1) })
+          .eq('id', user.id);
 
         return new Response(
           JSON.stringify({
             enhancement: result.choices[0].message.content,
-            model: 'grok-beta',
+            model: 'google/gemini-3-flash-preview',
+          }),
+          { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      case 'predator-analyze': {
+        // Specialized predator/grooming pattern detection
+        const { content, context } = data;
+
+        const response = await fetch(`${aiBaseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${aiApiKey}`,
+          },
+          body: JSON.stringify({
+            model: 'google/gemini-3-flash-preview',
+            messages: [
+              {
+                role: 'system',
+                content: `You are PredatorWatch AI, a specialized child safety and predator detection system within Scammer's Knightmare.
+Analyze messages, profiles, or behavior patterns for:
+- Grooming tactics (building trust, isolation, normalization)
+- Age/identity deception indicators
+- Inappropriate conversation escalation
+- Known predator language patterns
+- Platform evasion tactics
+
+Provide: Risk level, specific concerning patterns found, recommended immediate actions.
+Be thorough and specific. This is used to protect children and vulnerable people.`
+              },
+              {
+                role: 'user',
+                content: `Context: ${context || 'unknown'}\n\nContent to analyze:\n${content}`
+              }
+            ],
+            temperature: 0.2,
+            max_tokens: 1500,
+          }),
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          return new Response(
+            JSON.stringify({ error: `AI: ${errorText}` }),
+            { status: response.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
+
+        const result = await response.json();
+
+        await supabaseAdmin
+          .from('user_profiles')
+          .update({ ai_quota_used: (quotaUsed + 1) })
+          .eq('id', user.id);
+
+        return new Response(
+          JSON.stringify({
+            analysis: result.choices[0].message.content,
+            model: 'google/gemini-3-flash-preview',
           }),
           { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
@@ -266,7 +383,7 @@ Deno.serve(async (req) => {
         );
     }
   } catch (error: any) {
-    console.error('Operit AI Error:', error);
+    console.error('Knight AI Error:', error);
     return new Response(
       JSON.stringify({ error: error.message || 'Internal server error' }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

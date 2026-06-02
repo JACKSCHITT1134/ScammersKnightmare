@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { FunctionsHttpError } from '@supabase/supabase-js';
 
 export interface AIMessage {
   role: 'user' | 'assistant' | 'system';
@@ -14,10 +15,28 @@ export interface AIConversation {
 }
 
 export interface AIUsage {
-  quota_remaining: number;
+  quota_remaining: number | typeof Infinity;
   quota_total: number | null;
   quota_used: number;
   reset_at: string | null;
+}
+
+async function invokeWithErrorHandling(functionName: string, body: any): Promise<any> {
+  const { data, error } = await supabase.functions.invoke(functionName, { body });
+  if (error) {
+    let errorMessage = error.message;
+    if (error instanceof FunctionsHttpError) {
+      try {
+        const statusCode = (error as any).context?.status ?? 500;
+        const textContent = await (error as any).context?.text();
+        errorMessage = `[${statusCode}] ${textContent || error.message}`;
+      } catch {
+        errorMessage = error.message || 'Failed to read response';
+      }
+    }
+    throw new Error(errorMessage);
+  }
+  return data;
 }
 
 export const operitAI = {
@@ -34,13 +53,14 @@ export const operitAI = {
       .eq('id', user.id)
       .single();
 
+    // All users have AI access enabled - admin can disable individually
     return {
-      enabled: profile?.ai_features_enabled || false,
+      enabled: profile?.ai_features_enabled !== false,
       features: {
-        chat: profile?.ai_chat_enabled || false,
-        analysis: profile?.ai_analysis_enabled || false,
+        chat: profile?.ai_chat_enabled !== false,
+        analysis: profile?.ai_analysis_enabled !== false,
         quota: {
-          total: profile?.ai_monthly_quota,
+          total: profile?.ai_monthly_quota || null,
           used: profile?.ai_quota_used || 0,
           reset_at: profile?.ai_quota_reset_at,
         },
@@ -49,55 +69,27 @@ export const operitAI = {
   },
 
   /**
-   * Send chat message to AI
+   * Send chat message to Knight AI (powered by OnSpace AI / Gemini)
    */
   async chat(messages: AIMessage[], conversationId?: string): Promise<any> {
-    const { data, error } = await supabase.functions.invoke('operit-ai', {
-      body: {
-        action: 'chat',
-        data: {
-          messages,
-          conversationId,
-          model: 'grok-beta',
-        },
+    return invokeWithErrorHandling('operit-ai', {
+      action: 'chat',
+      data: {
+        messages,
+        conversationId,
+        model: 'google/gemini-3-flash-preview',
       },
     });
-
-    if (error) {
-      if (error instanceof Error && 'context' in error) {
-        const httpError = error as any;
-        const errorText = await httpError.context?.text();
-        throw new Error(errorText || error.message);
-      }
-      throw error;
-    }
-
-    return data;
   },
 
   /**
-   * Analyze text with AI
+   * Analyze text with Knight AI
    */
   async analyze(text: string, analysisType: 'threat' | 'sentiment' | 'general' = 'general'): Promise<string> {
-    const { data, error } = await supabase.functions.invoke('operit-ai', {
-      body: {
-        action: 'analyze',
-        data: {
-          text,
-          analysisType,
-        },
-      },
+    const data = await invokeWithErrorHandling('operit-ai', {
+      action: 'analyze',
+      data: { text, analysisType },
     });
-
-    if (error) {
-      if (error instanceof Error && 'context' in error) {
-        const httpError = error as any;
-        const errorText = await httpError.context?.text();
-        throw new Error(errorText || error.message);
-      }
-      throw error;
-    }
-
     return data.choices[0].message.content;
   },
 
@@ -105,26 +97,22 @@ export const operitAI = {
    * Enhance scan results with AI analysis
    */
   async enhanceScan(scanResult: any, scanType: string): Promise<string> {
-    const { data, error } = await supabase.functions.invoke('operit-ai', {
-      body: {
-        action: 'enhance-scan',
-        data: {
-          scanResult,
-          scanType,
-        },
-      },
+    const data = await invokeWithErrorHandling('operit-ai', {
+      action: 'enhance-scan',
+      data: { scanResult, scanType },
     });
-
-    if (error) {
-      if (error instanceof Error && 'context' in error) {
-        const httpError = error as any;
-        const errorText = await httpError.context?.text();
-        throw new Error(errorText || error.message);
-      }
-      throw error;
-    }
-
     return data.enhancement;
+  },
+
+  /**
+   * Specialized predator/grooming pattern analysis
+   */
+  async analyzePredator(content: string, context?: string): Promise<string> {
+    const data = await invokeWithErrorHandling('operit-ai', {
+      action: 'predator-analyze',
+      data: { content, context },
+    });
+    return data.analysis;
   },
 
   /**
@@ -175,7 +163,7 @@ export const operitAI = {
 
     const { data: profile } = await supabase
       .from('user_profiles')
-      .select('ai_monthly_quota, ai_quota_used, ai_quota_reset_at')
+      .select('ai_monthly_quota, ai_quota_used, ai_quota_reset_at, tier')
       .eq('id', user.id)
       .single();
 
@@ -183,7 +171,7 @@ export const operitAI = {
     const used = profile?.ai_quota_used || 0;
 
     return {
-      quota_total: total,
+      quota_total: total || null,
       quota_used: used,
       quota_remaining: total ? total - used : Infinity,
       reset_at: profile?.ai_quota_reset_at,
