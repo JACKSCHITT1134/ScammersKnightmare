@@ -153,7 +153,7 @@ serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     );
 
-    const { scan_type, value, user_id, session_token } = await req.json();
+    const { scan_type, value, user_id, session_token, all_agents } = await req.json();
 
     console.log(`🤖 Multi-Agent Coordinator: ${scan_type} scan`);
 
@@ -183,8 +183,8 @@ serve(async (req) => {
       session = data;
     }
 
-    // Select appropriate agents
-    const agentSelection = selectAgents(scan_type);
+    // Select agents — all_agents: true forces all 4 (Sub-Hive Prime Directive)
+    const agentSelection = all_agents ? ['PhishGuard', 'PredatorWatch', 'FraudSentinel', 'LinkTracer'] : selectAgents(scan_type);
     console.log(`🎯 Selected agents: ${agentSelection.join(', ')}`);
 
     // Load agent personalities from DB
