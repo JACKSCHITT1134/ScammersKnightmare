@@ -32,6 +32,7 @@ export function Navbar() {
         { to: '/auto-monitor', label: 'Auto Monitor' },
         { to: '/dark-web', label: 'Dark Web' },
         { to: '/social-analyzer', label: 'Social Media' },
+        { to: '/predator-hunter', label: '🔴 Predator Hunter' },
         { to: '/agents', label: 'AI Agents' },
         { to: '/subscription', label: 'Subscription' },
         ...(user.isAdmin ? [{ to: '/admin', label: 'Admin Panel' }] : []),

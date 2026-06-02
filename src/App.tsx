@@ -16,6 +16,7 @@ import { DarkWebMonitor } from '@/pages/DarkWebMonitor';
 import { SocialMediaAnalyzer } from '@/pages/SocialMediaAnalyzer';
 import { SubscriptionManagement } from '@/pages/SubscriptionManagement';
 import { AgentControl } from '@/pages/AgentControl';
+import { PredatorHunter } from '@/pages/PredatorHunter';
 
 function App() {
   return (
@@ -119,6 +120,14 @@ function App() {
             element={
               <ProtectedRoute>
                 <AgentControl />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/predator-hunter"
+            element={
+              <ProtectedRoute>
+                <PredatorHunter />
               </ProtectedRoute>
             }
           />

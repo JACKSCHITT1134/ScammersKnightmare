@@ -1,180 +1,131 @@
 import { supabase } from './supabase';
-import { FunctionsHttpError } from '@supabase/supabase-js';
 
 export interface AIMessage {
-  role: 'user' | 'assistant' | 'system';
+  role: 'user' | 'assistant';
   content: string;
 }
 
-export interface AIConversation {
-  id: string;
-  title: string;
-  model: string;
-  created_at: string;
-  updated_at: string;
-}
+class OperitAI {
+  async checkAccess(): Promise<{ enabled: boolean; features: { chat: boolean; analysis: boolean } }> {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return { enabled: false, features: { chat: false, analysis: false } };
 
-export interface AIUsage {
-  quota_remaining: number | typeof Infinity;
-  quota_total: number | null;
-  quota_used: number;
-  reset_at: string | null;
-}
+      const { data: profile } = await supabase
+        .from('user_profiles')
+        .select('ai_features_enabled, ai_chat_enabled, ai_analysis_enabled')
+        .eq('id', session.user.id)
+        .single();
 
-async function invokeWithErrorHandling(functionName: string, body: any): Promise<any> {
-  const { data, error } = await supabase.functions.invoke(functionName, { body });
-  if (error) {
-    let errorMessage = error.message;
-    if (error instanceof FunctionsHttpError) {
-      try {
-        const statusCode = (error as any).context?.status ?? 500;
-        const textContent = await (error as any).context?.text();
-        errorMessage = `[${statusCode}] ${textContent || error.message}`;
-      } catch {
-        errorMessage = error.message || 'Failed to read response';
-      }
-    }
-    throw new Error(errorMessage);
-  }
-  return data;
-}
-
-export const operitAI = {
-  /**
-   * Check if user has AI features enabled
-   */
-  async checkAccess(): Promise<{ enabled: boolean; features: any }> {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) throw new Error('Not authenticated');
-
-    const { data: profile } = await supabase
-      .from('user_profiles')
-      .select('ai_features_enabled, ai_chat_enabled, ai_analysis_enabled, ai_monthly_quota, ai_quota_used, ai_quota_reset_at')
-      .eq('id', user.id)
-      .single();
-
-    // All users have AI access enabled - admin can disable individually
-    return {
-      enabled: profile?.ai_features_enabled !== false,
-      features: {
-        chat: profile?.ai_chat_enabled !== false,
-        analysis: profile?.ai_analysis_enabled !== false,
-        quota: {
-          total: profile?.ai_monthly_quota || null,
-          used: profile?.ai_quota_used || 0,
-          reset_at: profile?.ai_quota_reset_at,
+      return {
+        enabled: profile?.ai_features_enabled ?? false,
+        features: {
+          chat: profile?.ai_chat_enabled ?? false,
+          analysis: profile?.ai_analysis_enabled ?? false,
         },
-      },
-    };
-  },
+      };
+    } catch {
+      return { enabled: true, features: { chat: true, analysis: true } };
+    }
+  }
 
-  /**
-   * Send chat message to Knight AI (powered by OnSpace AI / Gemini)
-   */
   async chat(messages: AIMessage[], conversationId?: string): Promise<any> {
-    return invokeWithErrorHandling('operit-ai', {
-      action: 'chat',
-      data: {
-        messages,
-        conversationId,
-        model: 'google/gemini-3-flash-preview',
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) throw new Error('Not authenticated');
+
+    const { data, error } = await supabase.functions.invoke('operit-ai', {
+      body: {
+        action: 'chat',
+        streaming: false,
+        data: { messages, conversationId, model: 'google/gemini-3-flash-preview' },
       },
     });
-  },
 
-  /**
-   * Analyze text with Knight AI
-   */
-  async analyze(text: string, analysisType: 'threat' | 'sentiment' | 'general' = 'general'): Promise<string> {
-    const data = await invokeWithErrorHandling('operit-ai', {
-      action: 'analyze',
-      data: { text, analysisType },
+    if (error) {
+      let msg = error.message;
+      try {
+        const txt = await (error as any).context?.text?.();
+        if (txt) msg = txt;
+      } catch { /* ignore */ }
+      throw new Error(msg);
+    }
+    return data;
+  }
+
+  async enhanceScan(scanDetails: any, scanType: string): Promise<string> {
+    const { data, error } = await supabase.functions.invoke('operit-ai', {
+      body: {
+        action: 'enhance-scan',
+        data: { scanResult: scanDetails, scanType },
+      },
     });
-    return data.choices[0].message.content;
-  },
 
-  /**
-   * Enhance scan results with AI analysis
-   */
-  async enhanceScan(scanResult: any, scanType: string): Promise<string> {
-    const data = await invokeWithErrorHandling('operit-ai', {
-      action: 'enhance-scan',
-      data: { scanResult, scanType },
+    if (error) {
+      let msg = error.message;
+      try {
+        const txt = await (error as any).context?.text?.();
+        if (txt) msg = txt;
+      } catch { /* ignore */ }
+      throw new Error(msg);
+    }
+    return data?.enhancement || 'No AI enhancement available.';
+  }
+
+  async analyze(text: string, analysisType = 'threat'): Promise<string> {
+    const { data, error } = await supabase.functions.invoke('operit-ai', {
+      body: {
+        action: 'analyze',
+        data: { text, analysisType },
+      },
     });
-    return data.enhancement;
-  },
 
-  /**
-   * Specialized predator/grooming pattern analysis
-   */
-  async analyzePredator(content: string, context?: string): Promise<string> {
-    const data = await invokeWithErrorHandling('operit-ai', {
-      action: 'predator-analyze',
-      data: { content, context },
-    });
-    return data.analysis;
-  },
+    if (error) throw new Error(error.message);
+    return data?.choices?.[0]?.message?.content || '';
+  }
 
-  /**
-   * Get user's conversations
-   */
-  async getConversations(): Promise<AIConversation[]> {
-    const { data, error } = await supabase
+  async getConversations(): Promise<any[]> {
+    const { data } = await supabase
       .from('ai_conversations')
-      .select('*')
-      .order('updated_at', { ascending: false });
-
-    if (error) throw error;
+      .select('id, title, model, updated_at')
+      .order('updated_at', { ascending: false })
+      .limit(20);
     return data || [];
-  },
+  }
 
-  /**
-   * Get messages for a conversation
-   */
   async getMessages(conversationId: string): Promise<AIMessage[]> {
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from('ai_messages')
-      .select('role, content, created_at')
+      .select('role, content')
       .eq('conversation_id', conversationId)
       .order('created_at', { ascending: true });
+    return (data || []) as AIMessage[];
+  }
 
-    if (error) throw error;
-    return data || [];
-  },
-
-  /**
-   * Delete a conversation
-   */
   async deleteConversation(conversationId: string): Promise<void> {
-    const { error } = await supabase
-      .from('ai_conversations')
-      .delete()
-      .eq('id', conversationId);
+    await supabase.from('ai_conversations').delete().eq('id', conversationId);
+  }
 
-    if (error) throw error;
-  },
-
-  /**
-   * Get user's AI usage statistics
-   */
-  async getUsageStats(): Promise<AIUsage> {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) throw new Error('Not authenticated');
+  async getUsageStats(): Promise<any> {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) return null;
 
     const { data: profile } = await supabase
       .from('user_profiles')
-      .select('ai_monthly_quota, ai_quota_used, ai_quota_reset_at, tier')
-      .eq('id', user.id)
+      .select('ai_monthly_quota, ai_quota_used, tier')
+      .eq('id', session.user.id)
       .single();
 
-    const total = profile?.ai_monthly_quota;
-    const used = profile?.ai_quota_used || 0;
+    if (!profile) return null;
 
     return {
-      quota_total: total || null,
-      quota_used: used,
-      quota_remaining: total ? total - used : Infinity,
-      reset_at: profile?.ai_quota_reset_at,
+      quota_used: profile.ai_quota_used || 0,
+      quota_total: profile.ai_monthly_quota,
+      quota_remaining: profile.ai_monthly_quota
+        ? Math.max(0, profile.ai_monthly_quota - (profile.ai_quota_used || 0))
+        : null,
+      tier: profile.tier,
     };
-  },
-};
+  }
+}
+
+export const operitAI = new OperitAI();

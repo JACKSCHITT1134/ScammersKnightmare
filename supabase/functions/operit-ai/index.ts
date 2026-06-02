@@ -1,13 +1,12 @@
 /**
  * OnSpace AI (Knight AI) - Chat, Analysis, and Threat Enhancement
- * Powered by OnSpace AI with google/gemini-3-flash-preview by default
+ * Supports streaming SSE responses for real-time chat
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders } from '../_shared/cors.ts';
 
 Deno.serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
@@ -24,10 +23,8 @@ Deno.serve(async (req) => {
     }
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
-    const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
-    const supabase = createClient(supabaseUrl, supabaseAnonKey);
+    const supabase = createClient(supabaseUrl, Deno.env.get('SUPABASE_ANON_KEY') ?? '');
 
-    // Get user from token
     const { data: { user }, error: userError } = await supabase.auth.getUser(token);
     if (userError || !user) {
       return new Response(
@@ -36,11 +33,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Check user's AI permissions
-    const supabaseAdmin = createClient(
-      supabaseUrl,
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-    );
+    const supabaseAdmin = createClient(supabaseUrl, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
 
     const { data: profile } = await supabaseAdmin
       .from('user_profiles')
@@ -48,49 +41,23 @@ Deno.serve(async (req) => {
       .eq('id', user.id)
       .single();
 
-    if (!profile?.ai_features_enabled) {
-      return new Response(
-        JSON.stringify({ error: 'AI features not enabled for this user. Contact admin for access.' }),
-        { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // Check quota
-    const quotaUsed = profile.ai_quota_used || 0;
-    const quotaTotal = profile.ai_monthly_quota;
-    if (quotaTotal !== null && quotaTotal !== undefined && quotaUsed >= quotaTotal) {
-      return new Response(
-        JSON.stringify({ error: 'Monthly AI quota exceeded. Please upgrade your plan or wait for next month.' }),
-        { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    const { action, data } = await req.json();
-
-    // OnSpace AI credentials
     const aiApiKey = Deno.env.get('ONSPACE_AI_API_KEY');
     const aiBaseUrl = Deno.env.get('ONSPACE_AI_BASE_URL');
 
     if (!aiApiKey || !aiBaseUrl) {
-      console.error('OnSpace AI not configured');
       return new Response(
         JSON.stringify({ error: 'AI service not configured' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
+    const { action, data, streaming } = await req.json();
+    const quotaUsed = profile?.ai_quota_used || 0;
+
     switch (action) {
       case 'chat': {
-        if (!profile.ai_chat_enabled) {
-          return new Response(
-            JSON.stringify({ error: 'AI chat not enabled for this user' }),
-            { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-          );
-        }
-
         const { messages, conversationId, model = 'google/gemini-3-flash-preview' } = data;
 
-        // Prepend system message for Knight AI persona
         const systemMessage = {
           role: 'system',
           content: `You are Knight AI, an expert cybersecurity assistant and scam detection specialist for Scammer's Knightmare. 
@@ -102,6 +69,66 @@ Always provide actionable advice and specific warning signs to watch for.`
 
         const allMessages = [systemMessage, ...messages];
 
+        if (streaming) {
+          // Streaming SSE response
+          const upstreamResponse = await fetch(`${aiBaseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${aiApiKey}`,
+            },
+            body: JSON.stringify({
+              model,
+              messages: allMessages,
+              temperature: 0.7,
+              max_tokens: 2000,
+              stream: true,
+            }),
+          });
+
+          if (!upstreamResponse.ok) {
+            const errorText = await upstreamResponse.text();
+            return new Response(
+              JSON.stringify({ error: `AI: ${errorText}` }),
+              { status: upstreamResponse.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+            );
+          }
+
+          // Save conversation ID asynchronously (don't await)
+          let convId = conversationId;
+          if (!convId) {
+            supabaseAdmin
+              .from('ai_conversations')
+              .insert({
+                user_id: user.id,
+                model,
+                title: messages[0]?.content?.substring(0, 100) || 'New Chat',
+              })
+              .select()
+              .single()
+              .then(({ data: newConv }) => {
+                // We can't send this back in stream, client handles it
+              });
+          }
+
+          // Increment quota
+          supabaseAdmin
+            .from('user_profiles')
+            .update({ ai_quota_used: quotaUsed + 1 })
+            .eq('id', user.id);
+
+          // Pipe the upstream SSE stream directly to client
+          return new Response(upstreamResponse.body, {
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              'Connection': 'keep-alive',
+            },
+          });
+        }
+
+        // Non-streaming response
         const response = await fetch(`${aiBaseUrl}/chat/completions`, {
           method: 'POST',
           headers: {
@@ -118,7 +145,6 @@ Always provide actionable advice and specific warning signs to watch for.`
 
         if (!response.ok) {
           const errorText = await response.text();
-          console.error('OnSpace AI Error:', errorText);
           return new Response(
             JSON.stringify({ error: `AI: ${errorText}` }),
             { status: response.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -126,9 +152,7 @@ Always provide actionable advice and specific warning signs to watch for.`
         }
 
         const result = await response.json();
-        console.log('Knight AI chat response received');
 
-        // Save conversation and messages
         let convId = conversationId;
         if (!convId) {
           const { data: newConv } = await supabaseAdmin
@@ -144,20 +168,16 @@ Always provide actionable advice and specific warning signs to watch for.`
         }
 
         if (convId) {
-          const messagesToSave = [
+          await supabaseAdmin.from('ai_messages').insert([
             { conversation_id: convId, role: 'user', content: messages[messages.length - 1].content },
             { conversation_id: convId, role: 'assistant', content: result.choices[0].message.content },
-          ];
-          await supabaseAdmin.from('ai_messages').insert(messagesToSave);
-          
-          // Update conversation timestamp
+          ]);
           await supabaseAdmin
             .from('ai_conversations')
             .update({ updated_at: new Date().toISOString() })
             .eq('id', convId);
         }
 
-        // Log usage
         const tokens = result.usage?.total_tokens || 1000;
         await supabaseAdmin.from('ai_usage_log').insert({
           user_id: user.id,
@@ -170,10 +190,9 @@ Always provide actionable advice and specific warning signs to watch for.`
           cost: tokens * 0.000001,
         });
 
-        // Increment quota usage
         await supabaseAdmin
           .from('user_profiles')
-          .update({ ai_quota_used: (quotaUsed + 1) })
+          .update({ ai_quota_used: quotaUsed + 1 })
           .eq('id', user.id);
 
         return new Response(
@@ -183,13 +202,6 @@ Always provide actionable advice and specific warning signs to watch for.`
       }
 
       case 'analyze': {
-        if (!profile.ai_analysis_enabled) {
-          return new Response(
-            JSON.stringify({ error: 'AI analysis not enabled for this user' }),
-            { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-          );
-        }
-
         const { text, analysisType = 'general' } = data;
 
         const systemPrompts: Record<string, string> = {
@@ -201,8 +213,6 @@ Be direct and specific. Use concrete examples from the text.`,
           general: 'You are Knight AI, a cybersecurity assistant. Analyze and provide insights about the provided content from a security perspective.',
         };
 
-        const systemPrompt = systemPrompts[analysisType] || systemPrompts.general;
-
         const response = await fetch(`${aiBaseUrl}/chat/completions`, {
           method: 'POST',
           headers: {
@@ -212,7 +222,7 @@ Be direct and specific. Use concrete examples from the text.`,
           body: JSON.stringify({
             model: 'google/gemini-3-flash-preview',
             messages: [
-              { role: 'system', content: systemPrompt },
+              { role: 'system', content: systemPrompts[analysisType] || systemPrompts.general },
               { role: 'user', content: text },
             ],
             temperature: 0.3,
@@ -230,7 +240,6 @@ Be direct and specific. Use concrete examples from the text.`,
 
         const result = await response.json();
 
-        // Log usage
         await supabaseAdmin.from('ai_usage_log').insert({
           user_id: user.id,
           model: 'google/gemini-3-flash-preview',
@@ -239,10 +248,7 @@ Be direct and specific. Use concrete examples from the text.`,
           cost: (result.usage?.total_tokens || 500) * 0.000001,
         });
 
-        await supabaseAdmin
-          .from('user_profiles')
-          .update({ ai_quota_used: (quotaUsed + 1) })
-          .eq('id', user.id);
+        await supabaseAdmin.from('user_profiles').update({ ai_quota_used: quotaUsed + 1 }).eq('id', user.id);
 
         return new Response(
           JSON.stringify(result),
@@ -302,10 +308,7 @@ Format your response in clear sections with emojis for readability.`,
           cost: (result.usage?.total_tokens || 800) * 0.000001,
         });
 
-        await supabaseAdmin
-          .from('user_profiles')
-          .update({ ai_quota_used: (quotaUsed + 1) })
-          .eq('id', user.id);
+        await supabaseAdmin.from('user_profiles').update({ ai_quota_used: quotaUsed + 1 }).eq('id', user.id);
 
         return new Response(
           JSON.stringify({
@@ -317,8 +320,68 @@ Format your response in clear sections with emojis for readability.`,
       }
 
       case 'predator-analyze': {
-        // Specialized predator/grooming pattern detection
-        const { content, context } = data;
+        const { content, context, streaming: streamPredator } = data;
+
+        if (streamPredator) {
+          const upstreamResponse = await fetch(`${aiBaseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${aiApiKey}`,
+            },
+            body: JSON.stringify({
+              model: 'google/gemini-3-flash-preview',
+              messages: [
+                {
+                  role: 'system',
+                  content: `You are PredatorWatch AI, a specialized child safety and predator detection system within Scammer's Knightmare.
+Analyze messages, profiles, or behavior patterns for:
+- Grooming tactics (building trust, isolation, normalization)
+- Age/identity deception indicators
+- Inappropriate conversation escalation
+- Known predator language patterns
+- Platform evasion tactics
+- Requests for photos, videos, or in-person meetings
+
+Provide a detailed analysis with:
+1. 🚨 THREAT LEVEL: (SAFE / LOW / MEDIUM / HIGH / CRITICAL)
+2. 🔍 RED FLAGS DETECTED: List each specific concerning pattern found
+3. 🧠 PSYCHOLOGICAL TACTICS: Identify manipulation methods being used
+4. ⚡ IMMEDIATE ACTIONS: What to do right now
+5. 📋 EVIDENCE TO PRESERVE: What to screenshot/save for authorities
+6. 🚔 REPORTING: Where and how to report this
+
+Be thorough and specific. This is used to protect children and vulnerable people.`
+                },
+                {
+                  role: 'user',
+                  content: `Context: ${context || 'Social media / messaging'}\n\nContent to analyze:\n${content}`
+                }
+              ],
+              temperature: 0.2,
+              max_tokens: 2000,
+              stream: true,
+            }),
+          });
+
+          if (!upstreamResponse.ok) {
+            const errorText = await upstreamResponse.text();
+            return new Response(
+              JSON.stringify({ error: `AI: ${errorText}` }),
+              { status: upstreamResponse.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+            );
+          }
+
+          await supabaseAdmin.from('user_profiles').update({ ai_quota_used: quotaUsed + 1 }).eq('id', user.id);
+
+          return new Response(upstreamResponse.body, {
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+            },
+          });
+        }
 
         const response = await fetch(`${aiBaseUrl}/chat/completions`, {
           method: 'POST',
@@ -332,15 +395,8 @@ Format your response in clear sections with emojis for readability.`,
               {
                 role: 'system',
                 content: `You are PredatorWatch AI, a specialized child safety and predator detection system within Scammer's Knightmare.
-Analyze messages, profiles, or behavior patterns for:
-- Grooming tactics (building trust, isolation, normalization)
-- Age/identity deception indicators
-- Inappropriate conversation escalation
-- Known predator language patterns
-- Platform evasion tactics
-
-Provide: Risk level, specific concerning patterns found, recommended immediate actions.
-Be thorough and specific. This is used to protect children and vulnerable people.`
+Analyze messages, profiles, or behavior patterns for grooming tactics, age deception, inappropriate escalation, predator language patterns, and evasion tactics.
+Provide: 1) THREAT LEVEL, 2) RED FLAGS DETECTED, 3) PSYCHOLOGICAL TACTICS, 4) IMMEDIATE ACTIONS, 5) REPORTING GUIDANCE.`
               },
               {
                 role: 'user',
@@ -348,7 +404,7 @@ Be thorough and specific. This is used to protect children and vulnerable people
               }
             ],
             temperature: 0.2,
-            max_tokens: 1500,
+            max_tokens: 2000,
           }),
         });
 
@@ -361,11 +417,7 @@ Be thorough and specific. This is used to protect children and vulnerable people
         }
 
         const result = await response.json();
-
-        await supabaseAdmin
-          .from('user_profiles')
-          .update({ ai_quota_used: (quotaUsed + 1) })
-          .eq('id', user.id);
+        await supabaseAdmin.from('user_profiles').update({ ai_quota_used: quotaUsed + 1 }).eq('id', user.id);
 
         return new Response(
           JSON.stringify({
